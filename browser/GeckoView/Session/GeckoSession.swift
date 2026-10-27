@@ -255,6 +255,7 @@ public class GeckoSession {
     }
     
     public func close() {
+        NotificationCenter.default.post(name: Self.didCloseNotification, object: self)
         contentDelegate = nil
         contentBlockingDelegate = nil
         navigationDelegate = nil

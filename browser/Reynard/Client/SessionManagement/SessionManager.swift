@@ -18,6 +18,7 @@ final class SessionManager {
     let trackingProtection: TrackingProtectionManager
     
     private var sessionsRequestedActive: [ObjectIdentifier: GeckoSession] = [:]
+    private var nativeVideoSessions: [ObjectIdentifier: GeckoSession] = [:]
     private var pageBackgroundColors: [ObjectIdentifier: UIColor] = [:]
     private var isApplicationForeground = true
     private(set) var isApplicationActive = true
@@ -106,7 +107,7 @@ final class SessionManager {
             return
         }
         sessionsRequestedActive[ObjectIdentifier(session)] = session
-        session.setActive(isApplicationForeground)
+        session.setActive(isApplicationForeground || nativeVideoSessions[ObjectIdentifier(session)] != nil)
         session.setFocused(true)
     }
     
@@ -116,7 +117,22 @@ final class SessionManager {
             return
         }
         session.setFocused(false)
-        session.setActive(false)
+        session.setActive(nativeVideoSessions[ObjectIdentifier(session)] != nil)
+    }
+
+    // A Gecko-decoded PiP surface must continue receiving compositor frames
+    // when the tab loses focus or the app moves into the background.
+    func keepSessionActiveForVideo(_ session: GeckoSession) {
+        guard session.isOpen() else { return }
+        nativeVideoSessions[ObjectIdentifier(session)] = session
+        session.setActive(true)
+    }
+
+    func releaseSessionActiveForVideo(_ session: GeckoSession) {
+        let identifier = ObjectIdentifier(session)
+        nativeVideoSessions.removeValue(forKey: identifier)
+        guard session.isOpen() else { return }
+        session.setActive(isApplicationForeground && sessionsRequestedActive[identifier] != nil)
     }
     
     // MARK: - Application Lifecycle
@@ -127,7 +143,7 @@ final class SessionManager {
         }
         isApplicationForeground = isForeground
         for session in sessionsRequestedActive.values {
-            session.setActive(isForeground)
+            session.setActive(isForeground || nativeVideoSessions[ObjectIdentifier(session)] != nil)
         }
     }
     
@@ -255,6 +271,7 @@ final class SessionManager {
     }
     
     private func closeImmediately(_ session: GeckoSession) {
+        nativeVideoSessions.removeValue(forKey: ObjectIdentifier(session))
         deactivate(session)
         trackingProtection.removeSession(session)
         permissionStore.removePrivateActions(for: session)

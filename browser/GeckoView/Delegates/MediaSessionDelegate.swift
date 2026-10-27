@@ -21,6 +21,12 @@ public struct MediaSessionPositionState {
     public let duration: Double
     public let playbackRate: Double
     public let position: Double
+
+    public init(duration: Double, playbackRate: Double, position: Double) {
+        self.duration = duration
+        self.playbackRate = playbackRate
+        self.position = position
+    }
 }
 
 public struct MediaSessionFeatures: OptionSet {
@@ -68,32 +74,47 @@ public extension MediaSessionDelegate {
 // Allows the host app to send playback control commands to Gecko.
 public class MediaSession {
     weak var session: GeckoSession?
+    // AVPlayer temporarily owns these commands while the webpage is paused.
+    public weak var playbackOverride: NativeMediaPlayback? {
+        didSet {
+            if playbackOverride == nil, let session {
+                session.mediaSessionDelegate?.onFeatures(session: session, features: webFeatures)
+            }
+        }
+    }
+    var webFeatures = MediaSessionFeatures()
     
     init(session: GeckoSession) {
         self.session = session
     }
     
     public func play() {
+        if let playbackOverride { playbackOverride.handleNativeMediaCommand(.play); return }
         session?.dispatcher.dispatch(type: "GeckoView:MediaSession:Play")
     }
     
     public func pause() {
+        if let playbackOverride { playbackOverride.handleNativeMediaCommand(.pause); return }
         session?.dispatcher.dispatch(type: "GeckoView:MediaSession:Pause")
     }
     
     public func stop() {
+        if let playbackOverride { playbackOverride.handleNativeMediaCommand(.stop); return }
         session?.dispatcher.dispatch(type: "GeckoView:MediaSession:Stop")
     }
     
     public func nextTrack() {
+        if let playbackOverride { playbackOverride.handleNativeMediaCommand(.nextTrack); return }
         session?.dispatcher.dispatch(type: "GeckoView:MediaSession:NextTrack")
     }
     
     public func previousTrack() {
+        if let playbackOverride { playbackOverride.handleNativeMediaCommand(.previousTrack); return }
         session?.dispatcher.dispatch(type: "GeckoView:MediaSession:PrevTrack")
     }
     
     public func seekForward(offset: Double = 0) {
+        if let playbackOverride { playbackOverride.handleNativeMediaCommand(.seekForward(offset)); return }
         session?.dispatcher.dispatch(
             type: "GeckoView:MediaSession:SeekForward",
             message: ["offset": offset]
@@ -101,6 +122,7 @@ public class MediaSession {
     }
     
     public func seekBackward(offset: Double = 0) {
+        if let playbackOverride { playbackOverride.handleNativeMediaCommand(.seekBackward(offset)); return }
         session?.dispatcher.dispatch(
             type: "GeckoView:MediaSession:SeekBackward",
             message: ["offset": offset]
@@ -108,6 +130,7 @@ public class MediaSession {
     }
     
     public func seekTo(time: Double, fast: Bool = false) {
+        if let playbackOverride { playbackOverride.handleNativeMediaCommand(.seekTo(time)); return }
         session?.dispatcher.dispatch(
             type: "GeckoView:MediaSession:SeekTo",
             message: ["time": time, "fast": fast]
@@ -115,6 +138,7 @@ public class MediaSession {
     }
     
     public func muteAudio(_ mute: Bool) {
+        if let playbackOverride { playbackOverride.handleNativeMediaCommand(.mute(mute)); return }
         session?.dispatcher.dispatch(
             type: "GeckoView:MediaSession:MuteAudio",
             message: ["mute": mute]
@@ -148,6 +172,13 @@ func newMediaSessionHandler(_ session: GeckoSession) -> GeckoSessionHandler {
         }
         
         let delegate = delegate as? MediaSessionDelegate
+
+        // Browser playback events describe the paused source during a handoff.
+        // The native controller publishes its own state to the same delegate.
+        if session.mediaSession.playbackOverride != nil,
+           event != .metadata, event != .features {
+            return nil
+        }
         
         switch event {
         case .activated:
@@ -190,7 +221,10 @@ func newMediaSessionHandler(_ session: GeckoSession) -> GeckoSessionHandler {
             if featurePayload["nexttrack"] as? Bool == true { features.insert(.nextTrack) }
             if featurePayload["previoustrack"] as? Bool == true { features.insert(.prevTrack) }
             if featurePayload["muteaudio"] as? Bool == true { features.insert(.muteAudio) }
-            delegate?.onFeatures(session: session, features: features)
+            session.mediaSession.webFeatures = features
+            if session.mediaSession.playbackOverride == nil {
+                delegate?.onFeatures(session: session, features: features)
+            }
             
         case .positionState:
             if let positionPayload = message?["state"] as? [String: Any] {

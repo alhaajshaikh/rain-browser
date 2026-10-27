@@ -17,6 +17,8 @@ protocol AddressBarDelegate: AnyObject {
     func addressBarDidRequestFindInPage(_ addressBar: AddressBar)
     func addressBarDidRequestReader(_ addressBar: AddressBar)
     func addressBarDidRequestPageZoom(_ addressBar: AddressBar)
+    func addressBarDidRequestNativeVideo(_ addressBar: AddressBar)
+    func addressBarDidRequestPictureInPicture(_ addressBar: AddressBar)
     func addressBarDidRequestWebsiteModeChange(_ addressBar: AddressBar)
     func addressBarDidRequestHideToolbar(_ addressBar: AddressBar)
     func addressBarDidRequestWebsiteSettings(_ addressBar: AddressBar)
@@ -428,6 +430,20 @@ final class AddressBar: UIView {
             onPageZoom: { [weak self] in
                 guard let self else { return }
                 self.delegate?.addressBarDidRequestPageZoom(self)
+            },
+            onPlayNativeVideo: { [weak self] in
+                guard let self else { return }
+                self.performAfterMenuDismissal { [weak self] in
+                    guard let self else { return }
+                    self.delegate?.addressBarDidRequestNativeVideo(self)
+                }
+            },
+            onPictureInPicture: { [weak self] in
+                guard let self else { return }
+                self.performAfterMenuDismissal { [weak self] in
+                    guard let self else { return }
+                    self.delegate?.addressBarDidRequestPictureInPicture(self)
+                }
             },
             onChangeWebsiteMode: { [weak self] in
                 guard let self else { return }

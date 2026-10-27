@@ -1,0 +1,252 @@
+name: Update and build Rain
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+    inputs:
+      update_upstream:
+        description: Merge the latest official Reynard release before building
+        type: boolean
+        default: true
+        required: true
+
+permissions:
+  contents: read
+
+# A second phone-triggered update waits for the current publication to finish.
+concurrency:
+  group: rain-release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check for a new official release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      build: ${{ steps.plan.outputs.build }}
+      update: ${{ steps.plan.outputs.update }}
+      upstream_tag: ${{ steps.upstream.outputs.upstream_tag }}
+    steps:
+      - name: Check out the custom default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          submodules: false
+          persist-credentials: false
+
+      - name: Set up Python for update checks
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Check the latest published stable release
+        if: ${{ github.event_name == 'schedule' || inputs.update_upstream }}
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/avkit/update-upstream.py --check
+
+      - name: Decide whether a full build is needed
+        id: plan
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          UPDATE_REQUESTED: ${{ github.event_name == 'schedule' || inputs.update_upstream }}
+          RELEASE_CHANGED: ${{ steps.upstream.outputs.changed || 'false' }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/avkit/build-needed.py --repository "$GITHUB_REPOSITORY" --event "$EVENT_NAME" --upstream-changed "$RELEASE_CHANGED"
+          echo "update=$UPDATE_REQUESTED" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build and publish Rain
+    needs: check
+    if: ${{ needs.check.outputs.build == 'true' }}
+    runs-on: macos-26
+    timeout-minutes: 360
+    permissions:
+      contents: write
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_GHA_VERSION: rain-standard
+    steps:
+      - name: Check out the custom default branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          submodules: false
+
+      - name: Set up Python for build tools
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      # A conflict must fail before publishing any IPA.
+      - name: Configure merge identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge the latest official release
+        if: ${{ needs.check.outputs.update == 'true' }}
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ needs.check.outputs.upstream_tag }}
+        run: python3 tools/avkit/update-upstream.py --tag "$UPSTREAM_TAG"
+
+      - name: Show hosted runner resources
+        run: |
+          uname -m
+          sysctl -n hw.memsize
+          df -h .
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26.6'
+
+      - name: Set up Node.js for bridge checks
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Check native video behavior
+        run: bash tools/avkit/build-checks.sh
+
+      - name: Install engine build dependencies
+        run: |
+          brew install python@3.12 lld cbindgen llvm
+          echo "$(brew --prefix python@3.12)/libexec/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix lld)/bin" >> "$GITHUB_PATH"
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
+      - name: Initialize engine and support source
+        run: |
+          git submodule sync --recursive
+          git submodule update --init --recursive support/idevice
+          git submodule update --init --depth 1 engine/firefox
+
+      - name: Select the pinned Gecko release
+        run: ./tools/development/update-gecko.sh
+
+      - name: Apply the fork's Gecko patches
+        run: ./tools/development/apply-patches.sh
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+
+      - name: Identify Rust toolchain for caches
+        id: rust
+        run: echo "hash=$(rustc -Vv | shasum -a 256 | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Gecko dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.mozbuild
+          key: rain-gecko-deps-${{ steps.rust.outputs.hash }}-${{ hashFiles('engine/release.txt') }}
+          restore-keys: |
+            rain-gecko-deps-${{ steps.rust.outputs.hash }}-
+
+      - name: Restore idevice support cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            support/idevice/target
+            browser/Reynard/JIT/RPPairing/libidevice_ffi.a
+          key: rain-idevice-${{ steps.rust.outputs.hash }}-${{ hashFiles('support/idevice/Cargo.lock', 'support/idevice/Cargo.toml', 'tools/development/build-idevice.sh') }}
+          restore-keys: |
+            rain-idevice-${{ steps.rust.outputs.hash }}-
+
+      - name: Set up compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.11
+
+      - name: Build Gecko from source
+        env:
+          CC: clang
+          CXX: clang++
+          LD: ld64.lld
+        run: ./tools/development/build-gecko.sh --use-sccache --auto-clobber
+
+      - name: Build idevice support from source
+        run: ./tools/development/build-idevice.sh
+
+      - name: Choose a numeric update version
+        id: version
+        run: |
+          BUILD_NUMBER="$(date -u +%Y%m%d%H%M%S)"
+          echo "build=$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+          echo "tag=rain-build-$BUILD_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Build and validate the unsigned AVKit IPA
+        run: bash tools/avkit/build-app.sh '${{ steps.version.outputs.build }}'
+
+      - name: Retain the validated IPA and build report
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rain-${{ steps.version.outputs.build }}
+          path: |
+            dist/Rain.ipa
+            dist/Rain.build.json
+          if-no-files-found: error
+
+      # Publish the feed only after the tested branch and immutable IPA exist.
+      - name: Verify the workflow tree is unchanged by the upstream merge
+        if: ${{ needs.check.outputs.update == 'true' }}
+        env:
+          PREVIOUS_COMMIT: ${{ steps.upstream.outputs.previous_commit }}
+        run: git diff --exit-code "$PREVIOUS_COMMIT" HEAD -- .github/workflows
+
+      - name: Push the successfully built custom branch
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: git push origin "HEAD:refs/heads/$DEFAULT_BRANCH"
+
+      - name: Publish the validated build release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build }}
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("dist/Rain.build.json").read_text())
+          Path("dist/release-notes.md").write_text(
+              "Rain custom browser build with its existing separate app identity, supplied icon, and native video changes.\n\n"
+              f"Rain based on Reynard {report['version']}, build {report['buildVersion']}.\n"
+              f"Source: `{report['sourceCommit']}`. Gecko: `{report['engineRelease']}`.\n\n"
+              "Install or update through SideStore and keep both app extensions. SideStore supplies signing; no Apple account credentials are stored in GitHub.\n\n"
+              "The cloud build and packaging checks passed. Video behavior still requires testing on an iPhone.\n"
+          )
+          PY
+          gh release create "$RELEASE_TAG" \
+            --target "$(git rev-parse HEAD)" \
+            --title "Rain build $BUILD_NUMBER" \
+            --notes-file dist/release-notes.md \
+            dist/Rain.ipa \
+            dist/Rain.build.json
+
+      - name: Publish the SideStore update source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: python3 tools/avkit/publish-source.py --repository "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG"
+
+      - name: Retain the Xcode log for build diagnosis
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Rain-build-log-${{ github.run_id }}-${{ github.run_attempt }}
+          path: dist/Rain.xcodebuild.log
+          if-no-files-found: ignore

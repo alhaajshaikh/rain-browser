@@ -11,6 +11,7 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
     private enum Section: CaseIterable {
         case previews
         case content
+        case video
         case links
         
         var text: SettingsSectionText {
@@ -19,6 +20,11 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
                 return SettingsSectionText(headerTitle: NSLocalizedString("Previews", comment: "Browsing settings section title"))
             case .content:
                 return SettingsSectionText(headerTitle: NSLocalizedString("Content", comment: "Browsing settings section title"))
+            case .video:
+                return SettingsSectionText(
+                    headerTitle: NSLocalizedString("Video", comment: "Browsing settings section title"),
+                    footerTitle: NSLocalizedString("Show the native-player button beside Picture in Picture in fullscreen videos. Open the native player to use AirPlay with compatible videos. The page menu stays available when this button is hidden.", comment: "Native video control setting explanation")
+                )
             case .links:
                 return SettingsSectionText(headerTitle: NSLocalizedString("Links", comment: "Browsing settings section title"))
             }
@@ -44,6 +50,7 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
     private let showLinkPreviewsSwitch = UISwitch()
     private let showImagePreviewsSwitch = UISwitch()
     private let openLinksInExternalAppsSwitch = UISwitch()
+    private let showNativePlayerButtonSwitch = UISwitch()
     
     init() {
         super.init(style: .insetGrouped)
@@ -80,6 +87,8 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
             return PreviewsRow.allCases.count
         case .content:
             return ContentRow.allCases.count
+        case .video:
+            return 1
         case .links:
             return LinksRow.allCases.count
         }
@@ -133,6 +142,13 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
             }
             cell.accessoryType = .disclosureIndicator
             return cell
+        case .video:
+            let cell = SettingsTableViewCell(style: .subtitle, reuseIdentifier: nil)
+            cell.selectionStyle = .none
+            cell.textLabel?.text = NSLocalizedString("Show Native Player / AirPlay Button", comment: "")
+            cell.textLabel?.numberOfLines = 0
+            cell.accessoryView = showNativePlayerButtonSwitch
+            return cell
         case .links:
             guard LinksRow.allCases.indices.contains(indexPath.row) else {
                 return UITableViewCell()
@@ -163,6 +179,8 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
         
         switch Section.allCases[indexPath.section] {
         case .previews:
+            return
+        case .video:
             return
         case .content:
             guard ContentRow.allCases.indices.contains(indexPath.row) else {
@@ -196,12 +214,14 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
         showLinkPreviewsSwitch.addTarget(self, action: #selector(showLinkPreviewsSwitchDidChange(_:)), for: .valueChanged)
         showImagePreviewsSwitch.addTarget(self, action: #selector(showImagePreviewsSwitchDidChange(_:)), for: .valueChanged)
         openLinksInExternalAppsSwitch.addTarget(self, action: #selector(openLinksInExternalAppsSwitchDidChange(_:)), for: .valueChanged)
+        showNativePlayerButtonSwitch.addTarget(self, action: #selector(showNativePlayerButtonSwitchDidChange(_:)), for: .valueChanged)
     }
     
     private func refreshDisplayedState() {
         showLinkPreviewsSwitch.isOn = Prefs.BrowsingSettings.showLinkPreviews
         showImagePreviewsSwitch.isOn = Prefs.BrowsingSettings.showImagePreviews
         openLinksInExternalAppsSwitch.isOn = Prefs.BrowsingSettings.openLinksInExternalApps
+        showNativePlayerButtonSwitch.isOn = NativeVideoPreferences.showsNativePlayerButton
     }
     
     @objc private func showLinkPreviewsSwitchDidChange(_ sender: UISwitch) {
@@ -214,5 +234,9 @@ final class BrowsingPreferencesViewController: SettingsTableViewController {
     
     @objc private func openLinksInExternalAppsSwitchDidChange(_ sender: UISwitch) {
         Prefs.BrowsingSettings.openLinksInExternalApps = sender.isOn
+    }
+
+    @objc private func showNativePlayerButtonSwitchDidChange(_ sender: UISwitch) {
+        NativeVideoPreferences.showsNativePlayerButton = sender.isOn
     }
 }

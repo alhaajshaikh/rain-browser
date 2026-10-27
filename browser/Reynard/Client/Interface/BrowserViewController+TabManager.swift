@@ -10,6 +10,7 @@ import UIKit
 
 extension BrowserViewController: TabManagerDelegate {
     func tabManagerDidChangeTabs(_ tabManager: TabManager) {
+        nativeVideoPlayback.selectedSessionDidChange(tabManager.selectedTab?.session)
         if let selectedTab = tabManager.selectedTab {
             if !contentView.isDisplaying(session: selectedTab.session) {
                 browserChrome.addressBar.clearKeyCommandHint()
@@ -51,6 +52,15 @@ extension BrowserViewController: TabManagerDelegate {
     
     func tabManager(_ tabManager: TabManager, didFinishLoading session: GeckoSession) {
         contentView.didFinishLoading(session: session)
+        nativeVideoPlayback.mediaPlaybackChanged(session: session)
+    }
+
+    func tabManager(_ tabManager: TabManager, didStartLoading session: GeckoSession) {
+        nativeVideoPlayback.sessionDidNavigate(session)
+    }
+
+    func tabManager(_ tabManager: TabManager, didScroll session: GeckoSession) {
+        nativeVideoPlayback.contentDidScroll(session: session)
     }
     
     func tabManager(_ tabManager: TabManager, didSelectTabAt index: Int, previousIndex: Int?) {
@@ -60,8 +70,10 @@ extension BrowserViewController: TabManagerDelegate {
         tabBar.setPendingExpansion(at: nil)
         
         guard let selectedTab = tabManager.activeTabs[safe: index] else {
+            nativeVideoPlayback.selectedSessionDidChange(nil)
             return
         }
+        nativeVideoPlayback.selectedSessionDidChange(selectedTab.session)
         
         if selectedTab.state.loadingState.isLoading {
             toolbarController.lock(for: .pageNavigation)
@@ -99,6 +111,7 @@ extension BrowserViewController: TabManagerDelegate {
     }
     
     func tabManager(_ tabManager: TabManager, didReplaceSelectedSession previousSession: GeckoSession, with replacementSession: GeckoSession) {
+        nativeVideoPlayback.selectedSessionDidChange(replacementSession)
         browserChrome.addressBar.clearKeyCommandHint()
         if contentView.isDisplaying(session: previousSession) {
             contentView.setTab(
@@ -155,10 +168,16 @@ extension BrowserViewController: TabManagerDelegate {
     }
     
     func tabManager(_ tabManager: TabManager, didChangeFullscreen fullScreen: Bool, for session: GeckoSession) {
+        if !fullScreen {
+            nativeVideoPlayback.leftFullscreen(session: session)
+        }
         guard tabManager.selectedTab?.session === session else {
             return
         }
         applyFullscreenState(fullScreen, for: session)
+        if fullScreen {
+            nativeVideoPlayback.enteredFullscreen(session: session)
+        }
     }
     
     func tabManager(_ tabManager: TabManager, didUpdateTabAt index: Int, reason: TabManagerUpdateReason) {
@@ -256,6 +275,7 @@ extension BrowserViewController: TabManagerDelegate {
             
         case .audio:
             refreshAddressBarAudioButton()
+            nativeVideoPlayback.mediaPlaybackChanged(session: tab.session)
         }
     }
     

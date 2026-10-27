@@ -13,12 +13,14 @@ final class AboutSettingsSection {
         case experimentalFeatures
         case appVersion
         case engineVersion
+        case checkForUpdates
         case sourceCode
         case supportProject
         case githubProfile
     }
     
     private var showsExperimentalFeatures = false
+    private let updateChecker = ReynardUpdateChecker()
     
     private var displayedRows: [Row] {
         return Row.allCases.filter {
@@ -55,9 +57,12 @@ final class AboutSettingsSection {
             let info = Bundle.main.infoDictionary
             let version = info?["CFBundleShortVersionString"] as? String ?? "Unknown"
             let build = info?["CFBundleVersion"] as? String ?? "Unknown"
-            return valueCell(title: NSLocalizedString("Reynard Browser", comment: ""), value: "\(version) (\(build))")
+            let name = info?["CFBundleDisplayName"] as? String ?? NSLocalizedString("Reynard Browser", comment: "")
+            return valueCell(title: name, value: "\(version) (\(build))")
         case .engineVersion:
             return valueCell(title: NSLocalizedString("Engine Version", comment: ""), value: GeckoRuntime.version)
+        case .checkForUpdates:
+            return linkCell(title: NSLocalizedString("Check Official Releases", comment: ""))
         case .sourceCode:
             return linkCell(title: NSLocalizedString("View Source Code", comment: ""))
         case .supportProject:
@@ -80,6 +85,11 @@ final class AboutSettingsSection {
             )
             return
         }
+
+        if row == .checkForUpdates {
+            updateChecker.check(from: viewController)
+            return
+        }
         
         if let url = url(for: row) {
             LibrarySharedUtils.openLinkInBrowser(url.absoluteString, from: viewController)
@@ -94,7 +104,7 @@ final class AboutSettingsSection {
             return URL(string: "https://buymeacoffee.com/hnimnot")
         case .githubProfile:
             return URL(string: "https://github.com/minh-ton")
-        case .experimentalFeatures, .appVersion, .engineVersion:
+        case .experimentalFeatures, .appVersion, .engineVersion, .checkForUpdates:
             return nil
         }
     }

@@ -1,5 +1,5 @@
 diff --git a/mobile/shared/modules/geckoview/GeckoViewContent.sys.mjs b/mobile/shared/modules/geckoview/GeckoViewContent.sys.mjs
-index 635806ea1724..0c5b324c7347 100644
+index 635806e..e0789a8 100644
 --- a/mobile/shared/modules/geckoview/GeckoViewContent.sys.mjs
 +++ b/mobile/shared/modules/geckoview/GeckoViewContent.sys.mjs
 @@ -3,6 +3,7 @@
@@ -10,7 +10,7 @@ index 635806ea1724..0c5b324c7347 100644
  
  export class GeckoViewContent extends GeckoViewModule {
    onInit() {
-@@ -26,6 +27,11 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -26,6 +27,13 @@ export class GeckoViewContent extends GeckoViewModule {
        "GeckoView:GetWebCompatInfo",
        "GeckoView:SendGleanBrokenSiteReport",
        "GeckoView:SendMoreWebCompatInfo",
@@ -19,10 +19,12 @@ index 635806ea1724..0c5b324c7347 100644
 +      "GeckoView:Autofill:FillOneTimeCode",
 +      "GeckoView:GetFocusedInputMetrics",
 +      "GeckoView:FetchImage",
++      "GeckoView:NativeVideo:Get",
++      "GeckoView:NativeVideo:Command",
      ]);
    }
  
-@@ -173,6 +179,19 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -173,6 +181,25 @@ export class GeckoViewContent extends GeckoViewModule {
    onEvent(aEvent, aData, aCallback) {
      debug`onEvent: event=${aEvent}, data=${aData}`;
  
@@ -34,6 +36,12 @@ index 635806ea1724..0c5b324c7347 100644
 +      case "GeckoView:GetFocusedInputMetrics":
 +        this._getFocusedInputMetrics(aCallback);
 +        return;
++      case "GeckoView:NativeVideo:Get":
++        this._getNativeVideo(aCallback);
++        return;
++      case "GeckoView:NativeVideo:Command":
++        this._commandNativeVideo(aData, aCallback);
++        return;
 +      case "GeckoView:FetchImage":
 +        this._fetchImage(aData, aCallback);
 +        return;
@@ -42,10 +50,184 @@ index 635806ea1724..0c5b324c7347 100644
      switch (aEvent) {
        case "GeckoViewContent:ExitFullScreen":
          this.browser.ownerDocument.exitFullscreen();
-@@ -491,6 +510,49 @@ export class GeckoViewContent extends GeckoViewModule {
+@@ -491,6 +518,223 @@ export class GeckoViewContent extends GeckoViewModule {
      aCallback.onSuccess(await this.actor.containsFormData());
    }
  
++  // These requests originate in browser chrome, never from page events. Query
++  // each WindowGlobal separately so cross-origin and out-of-process frames are
++  // included without granting the page access to the native player.
++  _nativeVideoContexts() {
++    const contexts = [];
++    const pending = [this.browser.browsingContext];
++    while (pending.length) {
++      const context = pending.shift();
++      contexts.push(context);
++      pending.push(...context.children);
++    }
++    return contexts;
++  }
++
++  async _nativeVideoSnapshot(select, target = null) {
++    const top = this.browser.browsingContext;
++    const states = [];
++    const failures = [];
++    let uncertain = false;
++    const valid = chain => this.browser.browsingContext === top && chain.every(
++      item => item.context.top === top &&
++        item.context.currentWindowGlobal === item.windowGlobal
++    );
++    const visit = async (context, scope, ancestors = [], mapping = { left: 0, top: 0, scaleX: 1, scaleY: 1 }) => {
++      const windowGlobal = context.currentWindowGlobal;
++      if (!windowGlobal || windowGlobal.isInBFCache) {
++        return;
++      }
++      const chain = [...ancestors, { context, windowGlobal }];
++      try {
++        const snapshot = await windowGlobal.getActor("GeckoViewContent")
++          .sendQuery("NativeVideo:Snapshot", { ...scope, select,
++            target: String(context.id) === target?.browsingContextID ? target : null });
++        if (!valid(chain)) {
++          uncertain = true;
++          return;
++        }
++        if (!snapshot || !Array.isArray(snapshot.frames) ||
++            !Number.isInteger(snapshot.visibleVideoCount) || snapshot.visibleVideoCount < 0) {
++          throw new Error("Invalid video visibility response");
++        }
++        states.push({ context, windowGlobal, chain, snapshot, mapping });
++        const frames = new Map(snapshot.frames.map(frame => [frame.id, frame]));
++        await Promise.all(context.children.map(async child => {
++          if (!child.currentWindowGlobal || child.currentWindowGlobal.isInBFCache) {
++            return;
++          }
++          const frame = frames.get(String(child.id));
++          if (!frame?.known) {
++            uncertain = true;
++            failures.push(`Frame ${child.id}: cannot determine embedded video visibility`);
++          } else if (frame.visible) {
++            const childMapping = mapping && frame.mapping ? {
++              left: mapping.left + frame.mapping.left * mapping.scaleX,
++              top: mapping.top + frame.mapping.top * mapping.scaleY,
++              scaleX: mapping.scaleX * frame.mapping.scaleX,
++              scaleY: mapping.scaleY * frame.mapping.scaleY,
++            } : null;
++            await visit(child, { clip: frame.clip,
++              ancestorFullscreen: !!frame.ancestorFullscreen }, chain, childMapping);
++          }
++        }));
++      } catch (error) {
++        // A broken frame must not hide a usable video in another visible frame.
++        // It does make the compositor source ambiguous for PiP until resolved.
++        uncertain = true;
++        failures.push(`Frame ${context.id}: ${error}`);
++      }
++    };
++    await visit(top, {});
++    const available = states.filter(state => valid(state.chain));
++    if (available.length !== states.length) {
++      uncertain = true;
++    }
++    return { states: available, failures,
++      viewport: available.find(state => state.context === top)?.snapshot.viewport ?? null,
++      totalVisibleVideoCount: available.reduce(
++        (sum, state) => sum + state.snapshot.visibleVideoCount, uncertain ? 2 : 0
++      ) };
++  }
++
++  _nativeVideoGeometry(state, viewport) {
++    const descriptor = state.snapshot.video;
++    const mapping = state.mapping;
++    const convert = rect => {
++      if (!rect || !mapping || !viewport || viewport.width <= 0 || viewport.height <= 0) {
++        return null;
++      }
++      const converted = {
++        x: rect.x * mapping.scaleX + mapping.left - viewport.left,
++        y: rect.y * mapping.scaleY + mapping.top - viewport.top,
++        width: rect.width * mapping.scaleX, height: rect.height * mapping.scaleY,
++      };
++      return Object.values(converted).every(Number.isFinite) &&
++        converted.width > 0 && converted.height > 0 ? converted : null;
++    };
++    return { ...descriptor, visibleRect: convert(descriptor?.visibleRect),
++      elementRect: convert(descriptor?.elementRect),
++      viewportWidth: viewport?.width ?? 0, viewportHeight: viewport?.height ?? 0 };
++  }
++
++  async _getNativeVideo(aCallback) {
++    try {
++      const { states, failures, totalVisibleVideoCount, viewport } =
++        await this._nativeVideoSnapshot(true);
++      const available = states.filter(state => state.snapshot.video).map(
++        state => ({ ...this._nativeVideoGeometry(state, viewport),
++          browsingContextID: String(state.context.id),
++          innerWindowID: String(state.windowGlobal.innerWindowId) })
++      );
++      if (!available.length && failures.length) {
++        throw new Error(`Video lookup failed: ${failures[0]}`);
++      }
++      const visible = available.filter(candidate => candidate.visibleArea > 0);
++      const videos = visible.length ? visible : available;
++      videos.sort((a, b) =>
++        Number(b.isFullscreen) - Number(a.isFullscreen) ||
++        Number(b.isPlaying) - Number(a.isPlaying) ||
++        b.visibleArea - a.visibleArea
++      );
++      aCallback.onSuccess(videos.length ? {
++        ...videos[0], totalVisibleVideoCount,
++      } : null);
++    } catch (error) {
++      aCallback.onError(`Cannot select video: ${error}`);
++    }
++  }
++
++  async _commandNativeVideo(aData, aCallback) {
++    try {
++      const context = this._nativeVideoContexts().find(
++        candidate => String(candidate.id) === aData?.browsingContextID
++      );
++      const windowGlobal = context?.currentWindowGlobal;
++      if (
++        !windowGlobal ||
++        windowGlobal.isInBFCache ||
++        String(windowGlobal.innerWindowId) !== aData.innerWindowID
++      ) {
++        throw new Error("The selected video document is no longer available");
++      }
++      let result;
++      if (aData.command === "status") {
++        const { states, failures, totalVisibleVideoCount, viewport } =
++          await this._nativeVideoSnapshot(false, aData);
++        const selected = states.find(state => state.context === context &&
++          state.windowGlobal === windowGlobal);
++        if (!selected?.snapshot.video) {
++          throw new Error(failures[0] || "The selected video is no longer visible");
++        }
++        result = { ...this._nativeVideoGeometry(selected, viewport), totalVisibleVideoCount };
++      } else {
++        result = await windowGlobal.getActor("GeckoViewContent")
++          .sendQuery("NativeVideo:Command", aData);
++        if (result && (aData.command === "continue" || aData.command === "follow")) {
++          const { states, totalVisibleVideoCount, viewport } = await this._nativeVideoSnapshot(false);
++          const state = states.find(item => item.context === context && item.windowGlobal === windowGlobal);
++          // The owner can remain alive in a hidden iframe after entering PiP.
++          // Its exact-token status is valid, while offscreen controls stay hidden.
++          result = { ...this._nativeVideoGeometry({ mapping: state?.mapping ?? null,
++            snapshot: { video: state ? result : { ...result, visibleRect: null, elementRect: null } } }, viewport),
++            totalVisibleVideoCount };
++        }
++      }
++      if (context.currentWindowGlobal !== windowGlobal ||
++          context.top !== this.browser.browsingContext) {
++        throw new Error("The selected video document changed during control");
++      }
++      aCallback.onSuccess(result);
++    } catch (error) {
++      aCallback.onError(`Cannot control video: ${error}`);
++    }
++  }
++
 +  async _fillOneTimeCode(aData, aCallback) {
 +    try {
 +      const result = await gAutofillManager.fillOneTimeCode(

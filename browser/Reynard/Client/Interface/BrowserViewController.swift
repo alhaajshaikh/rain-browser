@@ -69,6 +69,7 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
         toolbarController: toolbarController
     )
     lazy var contextMenuCoordinator = ContextMenuCoordinator(host: self, sessionManager: sessionManager)
+    lazy var nativeVideoPlayback = NativeVideoPlaybackCoordinator(host: self)
     lazy var downloadsCoordinator = DownloadsCoordinator(delegate: self)
     lazy var sidebarCoordinator = SidebarCoordinator(
         host: self,
@@ -253,6 +254,11 @@ final class BrowserViewController: UIViewController, GeckoScreenOrientationDeleg
     
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
+        nativeVideoPlayback.contentGeometryWillChange()
+        let observesGeometryEnd = coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            self?.nativeVideoPlayback.contentGeometryDidChange()
+        }
+        if !observesGeometryEnd { nativeVideoPlayback.contentGeometryDidChange() }
         if let readerSettings = presentedViewController as? ReaderSettingsViewController {
             readerSettings.dismiss(animated: false)
         }

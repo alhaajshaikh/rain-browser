@@ -182,6 +182,16 @@ extension BrowserViewController: AddressBarDelegate, AddressBarGestureDelegate {
         browserChrome.setPageZoomLevel(selectedTab.session.settings.pageZoom.level)
         browserChrome.showActionBar(.pageZoom, animated: true)
     }
+
+    func addressBarDidRequestNativeVideo(_ addressBar: AddressBar) {
+        guard let session = tabManager.selectedTab?.session else { return }
+        nativeVideoPlayback.play(session: session)
+    }
+
+    func addressBarDidRequestPictureInPicture(_ addressBar: AddressBar) {
+        guard let session = tabManager.selectedTab?.session else { return }
+        nativeVideoPlayback.startPictureInPicture(session: session)
+    }
     
     func addressBarDidRequestWebsiteModeChange(_ addressBar: AddressBar) {
         guard tabManager.changeWebsiteModeForSelectedTab() else {

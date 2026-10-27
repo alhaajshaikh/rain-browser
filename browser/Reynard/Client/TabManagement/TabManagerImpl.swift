@@ -1286,6 +1286,7 @@ extension TabManagerImplementation: ReaderModeControllerDelegate {
 
 extension TabManagerImplementation: ScrollDelegate {
     func onScrollChanged(session: GeckoSession, scrollX: Int, scrollY: Int) {
+        delegate?.tabManager(self, didScroll: session)
         guard let location = tabLocation(for: session) else { return }
         let tab = tabs(for: location.mode)[location.index]
         guard tab.state.readerMode.isActive else { return }
@@ -1742,6 +1743,8 @@ extension TabManagerImplementation: ProgressDelegate {
             tab.state.isSuppressingInitialBlankPageLoad = true
             return
         }
+
+        delegate?.tabManager(self, didStartLoading: session)
         
         if tab.state.loadError != nil {
             tab.state.loadError = nil

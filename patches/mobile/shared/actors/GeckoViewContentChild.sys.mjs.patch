@@ -1,5 +1,5 @@
 diff --git a/mobile/shared/actors/GeckoViewContentChild.sys.mjs b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
-index 9ca6e15bed3e..8f2cc35ead7f 100644
+index 9ca6e15..83ae845 100644
 --- a/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 +++ b/mobile/shared/actors/GeckoViewContentChild.sys.mjs
 @@ -21,6 +21,7 @@ const SCREEN_ORIENTATION_LANDSCAPE = 1;
@@ -48,12 +48,20 @@ index 9ca6e15bed3e..8f2cc35ead7f 100644
    orientation() {
      const currentOrientationType = this.contentWindow?.screen.orientation.type;
      if (!currentOrientationType) {
-@@ -84,6 +116,14 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -84,6 +116,22 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      const { name } = message;
      debug`receiveMessage: ${name}`;
  
 +    // New events (isn't Gecko's default)
 +    switch (name) {
++      case "NativeVideo:Get":
++        return this.getNativeVideo();
++      case "NativeVideo:Snapshot":
++        return this.nativeVideoSnapshot(message.data);
++      case "NativeVideo:VisibleCount":
++        return this.nativeVideoVisibleCount();
++      case "NativeVideo:Command":
++        return this.commandNativeVideo(message.data);
 +      case "GetFocusedInputMetrics":
 +        return this.getFocusedInputMetrics();
 +      case "FetchImage":
@@ -63,10 +71,615 @@ index 9ca6e15bed3e..8f2cc35ead7f 100644
      switch (name) {
        case "GeckoView:DOMFullscreenEntered": {
          const windowUtils = this.contentWindow?.windowUtils;
-@@ -199,6 +239,128 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
+@@ -199,6 +247,733 @@ export class GeckoViewContentChild extends GeckoViewActorChild {
      return false;
    }
  
++  nativeVideoViewport() {
++    const win = this.contentWindow;
++    const visual = win.visualViewport;
++    return { left: visual?.offsetLeft ?? 0, top: visual?.offsetTop ?? 0,
++      width: visual?.width ?? win.innerWidth, height: visual?.height ?? win.innerHeight };
++  }
++
++  nativeVideoSource(video) {
++    return {
++      url: video.currentSrc,
++      attribute: video.getAttribute("src"),
++      object: video.srcObject ? new WeakRef(video.srcObject) : null,
++    };
++  }
++
++  nativeVideoMatches(target) {
++    const video = target?.video.deref();
++    if (!video || !video.isConnected || video.ownerDocument !== this.document) {
++      return false;
++    }
++    const source = this.nativeVideoSource(video);
++    return source.url === target.source.url &&
++      source.attribute === target.source.attribute &&
++      !!source.object === !!target.source.object &&
++      source.object?.deref() === target.source.object?.deref();
++  }
++
++  nativeVideoElements() {
++    const videos = [];
++    const roots = [this.document];
++    for (let index = 0; index < roots.length; index++) {
++      for (const element of roots[index].querySelectorAll("*")) {
++        if (this.contentWindow.HTMLVideoElement.isInstance(element) &&
++            element.isConnected && element.readyState >= 1 &&
++            element.videoWidth > 0 && element.videoHeight > 0) {
++          videos.push(element);
++        }
++        const shadowRoot = element.openOrClosedShadowRoot;
++        if (shadowRoot) {
++          roots.push(shadowRoot);
++        }
++      }
++    }
++    return videos;
++  }
++
++  nativeVideoComposedParent(node) {
++    return node.flattenedTreeParentNode || node.assignedSlot || node.parentNode ||
++      node.getRootNode?.()?.host || null;
++  }
++
++  nativeVideoContains(root, element) {
++    for (let node = element; node; node = this.nativeVideoComposedParent(node)) {
++      if (node === root) {
++        return true;
++      }
++    }
++    return false;
++  }
++
++  nativeVideoFullscreenElement() {
++    let element = this.document.fullscreenElement;
++    // Document.fullscreenElement is retargeted to a shadow host. Resolve the
++    // actual fullscreen subtree, including closed and nested shadow roots.
++    while (element?.openOrClosedShadowRoot?.fullscreenElement) {
++      element = element.openOrClosedShadowRoot.fullscreenElement;
++    }
++    return element;
++  }
++
++  nativeVideoIntersectRect(first, second) {
++    if (!first || !second) {
++      return null;
++    }
++    const rect = {
++      left: Math.max(first.left, second.left),
++      top: Math.max(first.top, second.top),
++      right: Math.min(first.right, second.right),
++      bottom: Math.min(first.bottom, second.bottom),
++    };
++    return Object.values(rect).every(Number.isFinite) &&
++      rect.right > rect.left && rect.bottom > rect.top ? rect : null;
++  }
++
++  nativeVideoVisibleRect(element, scope = this._nativeVideoScope, elementRects = null) {
++    const win = element.ownerDocument?.defaultView;
++    if (!win || !element.checkVisibility({
++      contentVisibilityAuto: true, opacityProperty: true, visibilityProperty: true,
++    })) {
++      return null;
++    }
++    const fullscreen = this.nativeVideoFullscreenElement();
++    if (fullscreen && !this.nativeVideoContains(fullscreen, element)) {
++      return null;
++    }
++    const visual = win.visualViewport;
++    const left = visual?.offsetLeft ?? 0;
++    const top = visual?.offsetTop ?? 0;
++    const viewport = { left, top, right: left + (visual?.width ?? win.innerWidth),
++      bottom: top + (visual?.height ?? win.innerHeight) };
++    const elementRect = element.getBoundingClientRect();
++    elementRects?.set(element, elementRect);
++    let visible = this.nativeVideoIntersectRect(elementRect, viewport);
++    if (scope?.clip) {
++      visible = this.nativeVideoIntersectRect(visible, scope.clip);
++    }
++    // CSS visibility does not account for overflow clipping. A fullscreen
++    // element escapes its original ancestors' clips by entering the top layer.
++    for (let parent = element === fullscreen ? null : this.nativeVideoComposedParent(element);
++         visible && parent?.ownerDocument === this.document;
++         parent = this.nativeVideoComposedParent(parent)) {
++      if (parent.getBoundingClientRect) {
++        const style = win.getComputedStyle(parent);
++        const clipsX = /^(hidden|clip|auto|scroll)$/.test(style.overflowX);
++        const clipsY = /^(hidden|clip|auto|scroll)$/.test(style.overflowY);
++        if (clipsX || clipsY) {
++          const rect = parent.getBoundingClientRect();
++          if (clipsX) {
++            visible = this.nativeVideoIntersectRect(visible,
++              { ...visible, left: rect.left, right: rect.right });
++          }
++          if (visible && clipsY) {
++            visible = this.nativeVideoIntersectRect(visible,
++              { ...visible, top: rect.top, bottom: rect.bottom });
++          }
++        }
++      }
++      if (parent === fullscreen) {
++        break;
++      }
++    }
++    return visible;
++  }
++
++  nativeVideoVisibleArea(video) {
++    const rect = this.nativeVideoVisibleRect(video);
++    return rect ? (rect.right - rect.left) * (rect.bottom - rect.top) : 0;
++  }
++
++  nativeVideoFrameScopes() {
++    const fullscreen = this.nativeVideoFullscreenElement();
++    return Array.from(this.browsingContext.children ?? [], context => {
++      const id = String(context.id);
++      // embedderElement is read in the embedding document's own process. The
++      // parent chrome actor never reaches through a cross-origin WindowProxy.
++      const frame = context.embedderElement;
++      if (!frame || frame.ownerDocument !== this.document) {
++        return { id, known: false, visible: true };
++      }
++      if (!frame.isConnected) {
++        return { id, known: true, visible: false };
++      }
++      const visible = this.nativeVideoVisibleRect(frame);
++      if (!visible) {
++        return { id, known: true, visible: false };
++      }
++      if (!(frame.clientWidth > 0) || !(frame.clientHeight > 0)) {
++        return { id, known: true, visible: false };
++      }
++      let content;
++      if (typeof frame.getBoxQuads === "function") {
++        let quads;
++        try {
++          quads = frame.getBoxQuads({ box: "content" });
++        } catch (error) {
++          return { id, known: false, visible: true };
++        }
++        const quad = quads.length === 1 ? quads[0] : null;
++        if (!quad || Math.abs(quad.p1.y - quad.p2.y) > 0.01 ||
++            Math.abs(quad.p1.x - quad.p4.x) > 0.01 ||
++            Math.abs(quad.p2.x - quad.p3.x) > 0.01 ||
++            Math.abs(quad.p4.y - quad.p3.y) > 0.01 ||
++            quad.p2.x <= quad.p1.x || quad.p4.y <= quad.p1.y) {
++          return { id, known: false, visible: true };
++        }
++        content = { left: quad.p1.x, top: quad.p1.y,
++          right: quad.p2.x, bottom: quad.p4.y };
++      } else {
++        // Without quads, bounding boxes only establish the mapping when all
++        // transforms between this frame and the viewport preserve its axes.
++        for (let node = frame; node?.ownerDocument === this.document;
++             node = this.nativeVideoComposedParent(node)) {
++          const style = this.contentWindow.getComputedStyle(node);
++          if (style.transform && style.transform !== "none") {
++            const values = /^matrix\(([^)]+)\)$/.exec(style.transform)?.[1]
++              .split(",").map(Number);
++            if (!values || values.length !== 6 || !values.every(Number.isFinite) ||
++                values[0] <= 0 || values[3] <= 0 ||
++                Math.abs(values[1]) > 0.0001 || Math.abs(values[2]) > 0.0001) {
++              return { id, known: false, visible: true };
++            }
++          }
++          if (style.rotate && style.rotate !== "none" && parseFloat(style.rotate) !== 0 ||
++              style.perspective && style.perspective !== "none" ||
++              style.scale && style.scale !== "none" &&
++                !style.scale.split(/\s+/).map(Number).every(value => value > 0)) {
++            return { id, known: false, visible: true };
++          }
++        }
++        const rect = frame.getBoundingClientRect();
++        const scaleX = (rect.right - rect.left) / frame.offsetWidth;
++        const scaleY = (rect.bottom - rect.top) / frame.offsetHeight;
++        const left = rect.left + frame.clientLeft * scaleX;
++        const top = rect.top + frame.clientTop * scaleY;
++        content = { left, top, right: left + frame.clientWidth * scaleX,
++          bottom: top + frame.clientHeight * scaleY };
++      }
++      if (!Object.values(content).every(Number.isFinite) ||
++          content.right <= content.left || content.bottom <= content.top) {
++        return { id, known: false, visible: true };
++      }
++      const clipped = this.nativeVideoIntersectRect(visible, content);
++      if (!clipped) {
++        return { id, known: true, visible: false };
++      }
++      const scaleX = (content.right - content.left) / frame.clientWidth;
++      const scaleY = (content.bottom - content.top) / frame.clientHeight;
++      return { id, known: true, visible: true, clip: {
++        left: (clipped.left - content.left) / scaleX,
++        top: (clipped.top - content.top) / scaleY,
++        right: (clipped.right - content.left) / scaleX,
++        bottom: (clipped.bottom - content.top) / scaleY,
++      }, mapping: { left: content.left, top: content.top, scaleX, scaleY },
++      ancestorFullscreen: !!this._nativeVideoScope?.ancestorFullscreen ||
++        !!fullscreen && this.nativeVideoContains(fullscreen, frame) };
++    });
++  }
++
++  nativeVideoMeasurements() {
++    // Reuse only within this request. A later request must see newly inserted
++    // videos, shadow roots, style changes and source replacements immediately.
++    const elements = this.nativeVideoElements();
++    const rects = new Map();
++    const elementRects = new Map();
++    let visibleVideoCount = 0;
++    for (const video of elements) {
++      const rect = this.nativeVideoVisibleRect(video, this._nativeVideoScope, elementRects);
++      rects.set(video, rect);
++      if (rect) {
++        visibleVideoCount++;
++      }
++    }
++    return { elements, rects, elementRects, visibleVideoCount };
++  }
++
++  async nativeVideoSnapshot(data = {}) {
++    this._nativeVideoScope = { clip: data.clip ?? null,
++      ancestorFullscreen: !!data.ancestorFullscreen };
++    const measurements = this.nativeVideoMeasurements();
++    const video = data.select ? this.getNativeVideo(measurements) : data.target ?
++      await this.commandNativeVideo({ ...data.target, command: "status" }, measurements) : null;
++    return { video, visibleVideoCount: measurements.visibleVideoCount,
++      frames: this.nativeVideoFrameScopes(), viewport: this.nativeVideoViewport() };
++  }
++
++  nativeVideoVisibleCount() {
++    return this.nativeVideoMeasurements().visibleVideoCount;
++  }
++
++  nativeVideoDescriptor(video, token, measurements = this.nativeVideoMeasurements()) {
++    const win = video.ownerDocument?.defaultView;
++    if (!win?.windowGlobalChild) {
++      throw new Error("The video document has no active window");
++    }
++    const seekableRanges = [];
++    for (let i = 0; i < video.seekable.length; i++) {
++      const start = video.seekable.start(i);
++      const end = video.seekable.end(i);
++      if (Number.isFinite(start) && Number.isFinite(end)) {
++        seekableRanges.push({ start, end });
++      }
++    }
++    const fullscreenElement = this.nativeVideoFullscreenElement();
++    const rect = measurements.rects.has(video) ? measurements.rects.get(video) :
++      this.nativeVideoVisibleRect(video);
++    const elementRect = measurements.elementRects.get(video) ?? video.getBoundingClientRect();
++    const viewport = this.nativeVideoViewport();
++    let url = null;
++    try {
++      const candidate = new URL(video.currentSrc);
++      if (["https:", "http:"].includes(candidate.protocol) &&
++          !video.srcObject && !video.mediaKeys) {
++        url = candidate.href;
++      }
++    } catch (error) {
++      // MediaSource/object URLs remain usable by the engine's PiP renderer.
++    }
++    return {
++      token,
++      browsingContextID: String(this.browsingContext.id),
++      innerWindowID: String(win.windowGlobalChild.innerWindowId),
++      url,
++      sourceURL: video.currentSrc,
++      currentTime: Number.isFinite(video.currentTime) ? video.currentTime : 0,
++      duration: Number.isFinite(video.duration) ? video.duration : null,
++      isLive: video.duration === Infinity,
++      paused: video.paused,
++      ended: video.ended,
++      readyState: video.readyState,
++      playbackRate: video.playbackRate,
++      muted: video.muted,
++      volume: video.volume,
++      title: this.document.title || "",
++      userAgent: win.navigator.userAgent,
++      width: video.videoWidth,
++      height: video.videoHeight,
++      seekableStart: seekableRanges[0]?.start ?? null,
++      seekableEnd: seekableRanges.at(-1)?.end ?? null,
++      seekableRanges,
++      visibleArea: rect ? (rect.right - rect.left) * (rect.bottom - rect.top) : 0,
++      visibleRect: rect ? { x: rect.left, y: rect.top,
++        width: rect.right - rect.left, height: rect.bottom - rect.top } : null,
++      elementRect: { x: elementRect.left, y: elementRect.top,
++        width: elementRect.right - elementRect.left, height: elementRect.bottom - elementRect.top },
++      viewportWidth: viewport.width, viewportHeight: viewport.height,
++      visibleVideoCount: measurements.visibleVideoCount,
++      isFullscreen: !!this._nativeVideoScope?.ancestorFullscreen ||
++        !!fullscreenElement && this.nativeVideoContains(fullscreenElement, video),
++      isPlaying: !video.paused && !video.ended,
++      hasProtectedContent: !!video.mediaKeys,
++    };
++  }
++
++  nativeVideoRetire(target) {
++    const follow = target?.follow;
++    if (follow) {
++      target.video.deref()?.removeEventListener("ended", follow.onEnded, true);
++      target.follow = null;
++    }
++  }
++
++  nativeVideoFollow(target, enabled) {
++    this.nativeVideoRetire(target);
++    if (!enabled) {
++      return;
++    }
++    const video = target.video.deref();
++    const parent = video.parentNode;
++    const follow = { ended: !!video.ended, aliases: [],
++      player: parent ? new WeakRef(parent) : null, onEnded: null };
++    // Ended must come from the media element, not a page-dispatched event. A
++    // source swap in the middle of a video must not adopt an advert or preview.
++    follow.onEnded = event => {
++      if (event.isTrusted && video.ended && this.nativeVideoMatches(target)) {
++        follow.ended = true;
++      }
++    };
++    target.follow = follow;
++    video.addEventListener("ended", follow.onEnded, true);
++  }
++
++  nativeVideoContinue(target) {
++    const follow = target.follow;
++    if (!follow) {
++      throw new Error("Picture in Picture continuation is not enabled");
++    }
++    const previous = target.video.deref();
++    if (this.nativeVideoMatches(target)) {
++      follow.ended ||= !!previous.ended;
++      return previous.readyState >= 1 && previous.videoWidth > 0 && previous.videoHeight > 0 ?
++        this.nativeVideoDescriptor(previous, target.token) : null;
++    }
++    if (!follow.ended) {
++      return null;
++    }
++    let video = previous?.isConnected && previous.ownerDocument === this.document ? previous : null;
++    if (!video) {
++      const parent = follow.player?.deref();
++      if (!parent?.isConnected || parent.ownerDocument !== this.document) {
++        return null;
++      }
++      // Replacement is confined to the same immediate player container. Never
++      // fall back to this document's biggest video, another frame, or another tab.
++      const replacements = this.nativeVideoElements().filter(candidate => candidate.parentNode === parent);
++      if (replacements.length !== 1) {
++        return null;
++      }
++      [video] = replacements;
++    }
++    if (video.readyState < 1 || video.videoWidth <= 0 || video.videoHeight <= 0 || video.ended) {
++      return null;
++    }
++    const aliases = [...follow.aliases, target.token].slice(-64);
++    this.nativeVideoRetire(target);
++    const next = { token: Services.uuid.generateUUID().toString(), video: new WeakRef(video),
++      source: this.nativeVideoSource(video), original: null };
++    this._nativeVideoTarget = next;
++    this.nativeVideoFollow(next, true);
++    next.follow.aliases = aliases;
++    return this.nativeVideoDescriptor(video, next.token);
++  }
++
++  getNativeVideo(measurements = this.nativeVideoMeasurements()) {
++    const retained = this._nativeVideoTarget;
++    if (retained?.follow) {
++      // Discovery for an inline toolbar cannot replace the owner of a live PiP.
++      return this.nativeVideoMatches(retained) ?
++        this.nativeVideoDescriptor(retained.video.deref(), retained.token, measurements) : null;
++    }
++    const fullscreen = this.nativeVideoFullscreenElement();
++    const elements = measurements.elements.filter(
++      video => !fullscreen || this.nativeVideoContains(fullscreen, video)
++    );
++    const candidates = elements.map(video => ({
++      video,
++      descriptor: this.nativeVideoDescriptor(video, "", measurements),
++    })).filter(({ descriptor }) => descriptor.visibleArea > 0 ||
++      descriptor.isPlaying || descriptor.isFullscreen);
++    const visible = candidates.filter(({ descriptor }) => descriptor.visibleArea > 0);
++    // A hidden preview must not take priority over the video the user can see.
++    const videos = visible.length ? visible : candidates;
++    videos.sort((a, b) =>
++      Number(b.descriptor.isFullscreen) - Number(a.descriptor.isFullscreen) ||
++      Number(b.descriptor.isPlaying) - Number(a.descriptor.isPlaying) ||
++      b.descriptor.visibleArea - a.descriptor.visibleArea
++    );
++    const selected = videos[0];
++    if (!selected) {
++      this.nativeVideoRetire(this._nativeVideoTarget);
++      this._nativeVideoTarget = null;
++      return null;
++    }
++    const previous = this._nativeVideoTarget;
++    if (!previous || !this.nativeVideoMatches(previous) ||
++        previous.video.deref() !== selected.video) {
++      // Keep only one token per actor. A WeakRef also prevents a detached video
++      // being kept alive until the next command or document teardown.
++      this.nativeVideoRetire(previous);
++      this._nativeVideoTarget = {
++        token: Services.uuid.generateUUID().toString(),
++        video: new WeakRef(selected.video),
++        source: this.nativeVideoSource(selected.video),
++        original: null,
++      };
++    }
++    return { ...selected.descriptor, token: this._nativeVideoTarget.token };
++  }
++
++  nativeVideoSeek(video, time) {
++    if (!Number.isFinite(time) || time < 0) {
++      throw new Error("Invalid video playback position");
++    }
++    const ranges = video.seekable;
++    if (ranges.length) {
++      // Stay inside a real seekable range, including disjoint DVR ranges.
++      let nearest = ranges.start(0);
++      for (let i = 0; i < ranges.length; i++) {
++        const start = ranges.start(i);
++        const end = ranges.end(i);
++        if (time >= start && time <= end) {
++          nearest = time;
++          break;
++        }
++        const edge = time < start ? start : end;
++        if (Math.abs(edge - time) < Math.abs(nearest - time)) {
++          nearest = edge;
++        }
++      }
++      video.currentTime = nearest;
++    } else if (Number.isFinite(video.duration)) {
++      video.currentTime = Math.min(time, video.duration);
++    }
++  }
++
++  nativeVideoFullscreenAllowed(video) {
++    let sandbox;
++    try {
++      const principal = video.ownerDocument.nodePrincipal;
++      if (!principal || principal.isSystemPrincipal) {
++        return false;
++      }
++      // fullscreenEnabled has NeedsCallerType: reading it directly from this
++      // system actor would bypass the page's fullscreen Permissions Policy.
++      // A content-principal sandbox with Xrays reads the native getter with
++      // the same permissions as the selected document, without running page JS.
++      sandbox = Cu.Sandbox(principal, {
++        sandboxName: "Native video fullscreen permission",
++        sandboxPrototype: video.ownerDocument.defaultView,
++        wantXrays: true,
++      });
++      return Cu.evalInSandbox("document.fullscreenEnabled === true", sandbox) === true;
++    } catch (error) {
++      // An unverifiable policy must never become an implicit permission grant.
++      return false;
++    } finally {
++      if (sandbox) {
++        Cu.nukeSandbox(sandbox);
++      }
++    }
++  }
++
++  async commandNativeVideo(data, measurements) {
++    const target = this._nativeVideoTarget;
++    // A callback can time out after autoplay rotates the token. Only lease
++    // recovery/cancellation may use a prior token; ordinary playback controls
++    // and release must still address the exact current source. Re-arming a
++    // manual PiP starts a fresh lease and clears all aliases.
++    const leaseCommand = data?.command === "continue" ||
++      data?.command === "follow" && data.enabled === false;
++    const hasToken = target && (data?.token === target.token ||
++      leaseCommand && target.follow?.aliases.includes(data?.token));
++    if (!hasToken || data.browsingContextID !== String(this.browsingContext.id) ||
++        data.innerWindowID !== String(this.contentWindow.windowGlobalChild.innerWindowId)) {
++      throw new Error("The selected video or its source has changed");
++    }
++    if (data.command === "follow" && data.enabled === false) {
++      this.nativeVideoFollow(target, false);
++      return null;
++    }
++    if (data.command === "continue") {
++      return this.nativeVideoContinue(target);
++    }
++    if (!this.nativeVideoMatches(target)) {
++      throw new Error("The selected video or its source has changed");
++    }
++    const video = target.video.deref();
++    switch (data.command) {
++      case "follow":
++        if (data.enabled !== true || target.original) {
++          throw new Error("Invalid Picture in Picture continuation request");
++        }
++        this.nativeVideoFollow(target, true);
++        return this.nativeVideoDescriptor(video, target.token);
++      case "status":
++        return this.nativeVideoDescriptor(video, target.token, measurements);
++      case "release":
++        if (target.original) {
++          throw new Error("Restore native playback before releasing its target");
++        }
++        this.nativeVideoRetire(target);
++        this._nativeVideoTarget = null;
++        return true;
++      case "prepare": {
++        const descriptor = this.nativeVideoDescriptor(video, target.token);
++        if (!descriptor.url || target.original) {
++          throw new Error("This video cannot be handed to the native player");
++        }
++        target.original = descriptor;
++        video.pause();
++        // Preserve the original paused/rate/position snapshot for native startup.
++        return { ...descriptor, handoffPrepared: true };
++      }
++      case "restore": {
++        const original = target.original;
++        if (!original) {
++          throw new Error("No native playback handoff is active");
++        }
++        this.nativeVideoSeek(video,
++          Number.isFinite(data.currentTime) ? data.currentTime : original.currentTime);
++        const rate = data.playbackRate ?? original.playbackRate;
++        if (Number.isFinite(rate) && rate > 0 && rate <= 16) {
++          video.playbackRate = rate;
++        }
++        video.muted = typeof data.muted === "boolean" ? data.muted : original.muted;
++        const volume = data.volume ?? original.volume;
++        if (Number.isFinite(volume)) {
++          video.volume = Math.max(0, Math.min(1, volume));
++        }
++        const paused = typeof data.paused === "boolean" ? data.paused : original.paused;
++        // Retire before play(), which can fail because of autoplay policy. The
++        // exact original element remains paused safely if playback is rejected.
++        this.nativeVideoRetire(target);
++        this._nativeVideoTarget = null;
++        if (paused) {
++          video.pause();
++        } else {
++          await video.play();
++        }
++        return this.nativeVideoDescriptor(video, target.token);
++      }
++      case "play":
++        await video.play();
++        break;
++      case "pause":
++        video.pause();
++        break;
++      case "fullscreen":
++        if (this.nativeVideoVisibleArea(video) <= 0 ||
++            !this.nativeVideoFullscreenAllowed(video)) {
++          throw new Error("Fullscreen is not permitted for the selected video");
++        }
++        // This exact-target request follows an explicit native PiP action.
++        // Chrome CallerType supplies activation; the gate above retains the
++        // document/iframe permission checks that Chrome would otherwise skip.
++        await video.requestFullscreen();
++        break;
++      case "seek":
++        this.nativeVideoSeek(video, data.currentTime);
++        break;
++      case "skip":
++        if (!Number.isFinite(data.interval)) {
++          throw new Error("Invalid video skip interval");
++        }
++        // Read the exact target's position now, not a cached native snapshot.
++        this.nativeVideoSeek(video, Math.max(0, video.currentTime + data.interval));
++        break;
++      default:
++        throw new Error("Unknown native video command");
++    }
++    if (!this.nativeVideoMatches(target)) {
++      throw new Error("The selected video changed during playback control");
++    }
++    return this.nativeVideoDescriptor(video, target.token);
++  }
++
 +  getFocusedInputBounds(focusedElement, viewportHeight) {
 +    let bounds = focusedElement.getBoundingClientRect();
 +    let ancestor = focusedElement.parentElement;

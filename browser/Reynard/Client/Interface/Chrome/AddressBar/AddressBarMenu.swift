@@ -60,6 +60,8 @@ enum AddressBarMenu {
         onAddonSelected: @escaping (AddonMenuItem) -> Void,
         onFindInPage: @escaping () -> Void,
         onPageZoom: @escaping () -> Void,
+        onPlayNativeVideo: @escaping () -> Void,
+        onPictureInPicture: @escaping () -> Void,
         onChangeWebsiteMode: @escaping () -> Void,
         onHideToolbar: @escaping () -> Void,
         onWebsiteSettings: @escaping () -> Void,
@@ -118,6 +120,16 @@ enum AddressBarMenu {
             }
             pageActions.append(UIAction(title: NSLocalizedString("Find in Page", comment: ""), image: UIImage(named: "reynard.text.page.badge.magnifyingglass")) { _ in
                 onFindInPage()
+            })
+        }
+
+        if let url, url.host != nil,
+           ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+            pageActions.append(UIAction(title: NSLocalizedString("Play Video in Native Player", comment: ""), image: UIImage(systemName: "play.rectangle")) { _ in
+                onPlayNativeVideo()
+            })
+            pageActions.append(UIAction(title: NSLocalizedString("Picture in Picture", comment: ""), image: UIImage(systemName: "pip")) { _ in
+                onPictureInPicture()
             })
         }
         

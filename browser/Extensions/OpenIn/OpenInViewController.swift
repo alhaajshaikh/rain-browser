@@ -11,6 +11,10 @@ import MobileCoreServices
 
 final class OpenInViewController: UIViewController {
     private var hasStartedOpenFlow = false
+    private var browserOpenError: String {
+        let name = Bundle.main.object(forInfoDictionaryKey: "ReynardBrowserDisplayName") as? String ?? "Reynard"
+        return String(format: NSLocalizedString("Unable to open %@.", comment: ""), name)
+    }
     
     override func loadView() {
         let view = UIView()
@@ -47,7 +51,7 @@ final class OpenInViewController: UIViewController {
             }
             
             guard let browserURL = self.browserOpenURL(for: sharedURL) else {
-                self.finishWithError(message: "Unable to open Reynard.")
+                self.finishWithError(message: self.browserOpenError)
                 return
             }
             
@@ -74,10 +78,10 @@ final class OpenInViewController: UIViewController {
     }
     
     private func browserOpenURL(for sharedURL: URL) -> URL? {
-        guard var components = URLComponents(string: "reynard://open") else {
-            return nil
-        }
-        
+        let browserScheme = Bundle.main.object(forInfoDictionaryKey: "ReynardURLScheme") as? String ?? "reynard"
+        var components = URLComponents()
+        components.scheme = browserScheme
+        components.host = "open"
         components.queryItems = [
             URLQueryItem(name: "url", value: sharedURL.absoluteString)
         ]
@@ -106,7 +110,7 @@ final class OpenInViewController: UIViewController {
             responder = r.next
         }
 
-        finishWithError(message: "Unable to open Reynard.")
+        finishWithError(message: browserOpenError)
     }
     
     private func clearBackgrounds(startingAt view: UIView?) {
