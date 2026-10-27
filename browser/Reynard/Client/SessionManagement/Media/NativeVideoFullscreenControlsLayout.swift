@@ -48,9 +48,9 @@ struct NativeVideoFullscreenControlsLayout {
                        height: max(0, min(safe.maxY, picture.minY) - safe.minY))
             ]
         }
-        if let margin = margins.first(where: { $0.width >= visualWidth && $0.height >= requestedHeight }) {
-            let visual = CGRect(x: margin.midX - visualWidth / 2, y: margin.midY - actionsHeight / 2,
-                                width: visualWidth, height: actionsHeight)
+        if let margin = margins.first(where: { $0.width >= Self.visualWidth && $0.height >= requestedHeight }) {
+            let visual = CGRect(x: margin.midX - Self.visualWidth / 2, y: margin.midY - actionsHeight / 2,
+                                width: Self.visualWidth, height: actionsHeight)
             let hit = CGRect(x: clamp(visual.midX - touchWidth / 2, safe.minX, safe.maxX - touchWidth),
                              y: visual.minY, width: touchWidth, height: actionsHeight)
             return Self(actionsFrame: hit, actionsVisualFrame: visual,
