@@ -47,7 +47,6 @@ run_xcodebuild() {
 		-archivePath "$DIST_DIR/Reynard.xcarchive" \
 		-project "$PROJECT_PATH" \
 		-sdk iphoneos \
-		-arch arm64 \
 		-configuration Release \
 		-xcconfig "$BUILD_XCCONFIG_PATH" \
 		"$@"
