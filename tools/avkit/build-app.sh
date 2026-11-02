@@ -18,7 +18,6 @@ xcodebuild archive \
     -archivePath "$DIST_DIR/Rain.xcarchive" \
     -project "$DIST_DIR/avkit-build/browser/Reynard.xcodeproj" \
     -sdk iphoneos \
-    -arch arm64 \
     -destination 'generic/platform=iOS' \
     -configuration Release \
     -xcconfig "$DIST_DIR/avkit-build/Rain.xcconfig" \
